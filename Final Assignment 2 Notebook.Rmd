@@ -1,0 +1,388 @@
+---
+title: "Biology Assignment 2"
+author: "Dónal Heelan"
+output: html_notebook
+---
+
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(EnhancedVolcano)
+
+packageVersion("DESeq2")
+
+```
+```{r}
+#Step 1 -> 5 - Read data in from dataset and seperate into variables
+path = "C:/Users/donal/College/Biology/Assignment 2/Data/brca_tcga_pan_can_atlas_2018/"
+setwd(path)
+
+rna_seq_data <- read.delim("data_mrna_seq_v2_rsem.txt")
+patient_data <- read.delim("data_clinical_patient.txt")
+patient_data = patient_data[-(1:4), ]
+cna_data <- read.delim("data_cna.txt")
+print("Done")
+```
+
+
+```{r}
+# Step 6 (a) - Make the formatting of the Patient ID match across all files and check number of instances
+patient_ids = patient_data[,1]
+patient_ids_clean = gsub("\\.", "-", substr(patient_ids, 1, 12))
+
+rna_seq_ids = colnames(rna_seq_data)[3:ncol(rna_seq_data)]
+rna_seq_ids = gsub("\\.", "-", substr(rna_seq_ids, 1, 12))
+
+cna_ids = colnames(cna_data)[3:ncol(cna_data)]
+cna_ids = gsub("\\.", "-", substr(cna_ids, 1, 12))
+
+print(paste("The length of patient IDs is ", length(patient_ids), " and the patients IDs are:"))
+print(head(patient_ids))
+
+print(paste("The length of RNA seq IDs is ", length(rna_seq_ids), " and the rna_seq IDs are:"))
+print(head(rna_seq_ids))
+
+print(paste("The length of CNA IDs is ", length(cna_ids), " and the CNA IDs are:"))
+print(head(cna_ids))
+
+
+```
+```{r}
+# Step 6(b) - Match all ids together
+matched_ids = intersect(intersect(patient_ids, rna_seq_ids), cna_ids)
+
+rna_seq_index = which(rna_seq_ids %in% matched_ids)
+cna_index = which(cna_ids %in% matched_ids)
+patient_index = which(patient_ids %in% matched_ids)
+
+rna_seq_matched = rna_seq_data[, c(1:2, rna_seq_index + 2)]
+cna_matched = cna_data[, c(1:2, cna_index + 2)]           
+patient_matched = patient_data[patient_index, ] 
+```
+
+
+```{r}
+# 7. - Create metadata using CNA level of ERBB2+ and show on barchart
+assay = round(as.matrix(rna_seq_matched[, -c(1, 2)]))
+rownames(assay) = rna_seq_matched[, 1]
+
+metadata = matrix(0, dim(assay)[2], 1)
+erbb2_idx = which(cna_matched$Hugo_Symbol == "ERBB2")
+
+for (i in 1:dim(assay)[2]) {
+  metadata[i, 1] = 1*(as.numeric(cna_matched[erbb2_idx, i+2]) > 0)
+}
+
+metadata[is.na(metadata)] = 0
+
+colnames(metadata) = c("ERBB2_amp")
+
+amp_samples = sum(metadata == 1)
+non_amp_samples = sum(metadata == 0)
+
+print(amp_samples)
+print(non_amp_samples)
+
+barplot(table(metadata),
+        main = "Distribution of Amplified Samples",
+        names.arg = c("Non-amplified", "Amplified"),
+        ylab = "Number of Samples",
+        ylim = c(0, 800),
+        col = c("darkblue", "darkred"),  
+        axes = FALSE)  
+
+axis(2, seq(0, 800, by = 100), las = 1)
+axis(1, at = c(0.7, 1.9), labels = FALSE, lwd = 1) 
+```
+```{r}
+# 8 - Normalise dataset using the DESeq2 library
+if(!require("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if(!require("DESeq2", quietly = TRUE)) {
+  BiocManager::install("DESeq")
+}
+
+library(DESeq2)
+
+assay[is.na(assay)] = 0
+assay[assay < 0] = 0
+
+smallestGroupSize = 3
+keep = rowSums(assay >- 10) >= smallestGroupSize
+assay = assay[keep, ]
+
+dds = DESeqDataSetFromMatrix(countData = assay,
+                             colData = metadata,
+                             design = ~ ERBB2_amp)
+
+dds = DESeq(dds)
+resultsNames(dds)
+
+
+```
+```{r}
+# 9 - Obtain differentially expressed genes
+res = results(dds)
+res[order(res$padj)[1:10], ]
+```
+```{r}
+# 10: Perform a pathway enrichment analysis
+if (!requireNamespace("clusterProfiler", quietly = TRUE))
+  BiocManager::install("clusterProfiler")
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE))
+  BiocManager::install("org.Hs.eg.db")
+
+if (!requireNamespace("enrichplot", quietly = TRUE))
+  install.packages("enrichplot")
+
+
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+
+# get subset of differentially expressed genes.
+# NB - gonna have to remove the null elements as they breaks it
+
+good_rows <- !is.na(res$padj)
+res <- res[good_rows, ]
+res_sig = res[res$padj<0.05,]
+
+
+DE_over = rownames(res_sig[res_sig$log2FoldChange>0,])
+DE_under = rownames(res_sig[res_sig$log2FoldChange<0,])
+
+```
+```{r}
+
+go_results_over = enrichGO(
+  gene          = DE_over,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",  
+  ont           = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+
+```
+
+
+```{r}
+
+print(head(go_results_over))
+
+dotplot(go_results_over, showCategory=10) + ggtitle("Gene Ontology Enrichment Over Expressed")
+```
+
+
+```{r}
+# Under expressed 
+
+go_results_under = enrichGO(
+  gene          = DE_under,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",  
+  ont           = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# print and plot results
+print(head(go_results_under))
+
+dotplot(go_results_under, showCategory=10) + ggtitle("Gene Ontology Enrichment Under Expressed")
+```
+
+```{r}
+if (!requireNamespace("pathview", quietly = TRUE))
+  BiocManager::install("pathview")
+
+if (!requireNamespace("ReactomePA", quietly = TRUE))
+  BiocManager::install("ReactomePA")
+
+library(ReactomePA)
+library(pathview)
+
+# we need to map into entrez for Reactome and Keggs
+
+gene_entrez_over <- bitr(
+  DE_over,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+
+gene_entrez_over <- bitr(
+  DE_over,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+gene_entrez_under <- bitr(
+  DE_under,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+kegg_results_over =  enrichKEGG(
+  gene          = gene_entrez_over[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+kegg_results_under =  enrichKEGG(
+  gene          = gene_entrez_under[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+print(head(kegg_results_over))
+
+dotplot(kegg_results_over, showCategory=10) + ggtitle("Kegg Pathway Enrichment Over Expressed")
+
+print(head(kegg_results_under))
+
+dotplot(kegg_results_under, showCategory=10) + ggtitle("Kegg Pathway Enrichment Under Expressed")
+```
+
+```{r}
+reactome_results_over =  enrichPathway(
+  gene          = gene_entrez_over[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+)
+
+reactome_results_under =  enrichPathway(
+  gene          = gene_entrez_under[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+)
+
+
+print(head(reactome_results_over))
+
+dotplot(reactome_results_over, showCategory=10) + ggtitle("Reactome Pathway Enrichment Over Expressed")
+
+print(head(reactome_results_under))
+
+dotplot(reactome_results_under, showCategory=10) + ggtitle("Reactome Pathway Enrichment Under Expressed")
+```
+
+```{r}
+go_results_under_pw = pairwise_termsim(go_results_under)
+treeplot(go_results_under_pw)+ ggtitle("GO Enrichment Under Expressed")
+
+kegg_results_under_pw = pairwise_termsim(kegg_results_under)
+treeplot(kegg_results_under_pw)+ ggtitle("KEGG Enrichment Under Expressed")
+```
+
+```{r}
+# 11. Get variance stabilised transformed expression values
+vsd = vst(dds)
+
+par(mfrow = c(1, 2))
+
+```
+
+```{r}
+# 12(a). Create PCA plot of the 2 largest principal components 
+plotPCA(vsd, intgroup = c("ERBB2_amp"))
+```
+
+```{r}
+# 12(b). Create a heatmap, making sure to clean the data and order the top 20 genes first
+if(!requireNamespace("pheatmap", quietly = TRUE)) {
+  install.packages("pheatmap")
+}
+library(pheatmap)
+
+
+res_clean <- res[!is.na(res$padj), ]
+top_DE <- order(res_clean$padj)
+
+# get top 20 genes
+vsd_DE <- assay(vsd)[top_DE[1:20], ]
+vsd_DE <- vsd_DE[rowSums(is.nan(vsd_DE)) == 0, ]
+
+
+vsd_DE <- vsd_DE[apply(vsd_DE, 1, function(x) length(unique(x)) > 1), ]
+
+# annotate
+annotation_col <- data.frame(ERBB2_Status = metadata[, 1])
+rownames(annotation_col) <- colnames(vsd)
+annotation_col <- annotation_col[colnames(vsd_DE), , drop = FALSE]
+
+pheatmap(
+  vsd_DE,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  scale = "row",
+  show_colnames = FALSE,
+  show_rownames = TRUE,
+  annotation_col = annotation_col
+)
+
+```
+
+
+```{r}
+if (!requireNamespace("glmnet", quietly = TRUE)) {
+  install.packages("glmnet")
+}
+if (!requireNamespace("survival", quietly = TRUE)) {
+  install.packages("survival")
+}
+
+library(glmnet)
+library(survival)
+
+de_gene_ids <- rownames(res_sig)  # Significant DE genes identified in res_sig
+vsd_data <- assay(vsd)[de_gene_ids, ]
+
+# Prepare survival data
+os_time <- as.numeric(patient_matched$Overall.Survival..Months.)
+os_status <- as.numeric(patient_matched$Overall.Survival.Status == "1:DECEASED")
+
+# Filter valid survival cases
+valid_indices <- os_time > 0
+filtered_time <- os_time[valid_indices]
+filtered_status <- os_status[valid_indices]
+filtered_vsd <- vsd_data[, valid_indices]
+
+# Create survival object
+survival_response <- Surv(filtered_time, filtered_status)
+
+# Prepare gene expression matrix for glmnet
+expression_matrix <- t(filtered_vsd)  # Samples as rows, genes as columns
+
+# Fit a Cox model with LASSO regularization
+cox_model <- glmnet(expression_matrix, survival_response, family = "cox", alpha = 1)
+
+# Perform cross-validation for lambda selection
+cv_model <- cv.glmnet(expression_matrix, survival_response, family = "cox")
+plot(cv_model)
+
+# Generate survival probabilities using the best lambda
+optimal_fit <- survfit(cv_model, x = expression_matrix, y = survival_response, s = "lambda.min")
+
+# Plot survival probability curves
+plot(optimal_fit, xlab = "Months", ylab = "Survival Probability", main = "Overall Survival Prediction")
+```
